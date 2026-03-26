@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import base64
 from io import BytesIO
+import uuid
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
@@ -51,10 +53,10 @@ def run_query(query: str):
 @app.post("/execute-sql")
 def execute_sql(payload: SQLQuery):
     rows = run_query(payload.query)
-    # Si résultat = [[123]] ⇒ renvoyer {"value": 123}
     if rows and len(rows) == 1 and isinstance(rows[0], (list, tuple)) and len(rows[0]) == 1:
         return {"value": rows[0][0]}
     return {"result": rows}
+
 
 @app.get("/healthz")
 def healthz():
@@ -63,14 +65,22 @@ def healthz():
 
 
 # ---------------------------------------------------------
-#  PARTIE 2 — NOUVEL ENDPOINT POUR GÉNÉRER DES GRAPHIQUES
+#  PARTIE 2 — MODULE GRAPHIQUES + PUBLIC URL
 # ---------------------------------------------------------
+
+# Créer dossier static (si absent)
+if not os.path.exists("static"):
+    os.makedirs("static")
+
+# Monter le dossier statique
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 class ChartRequest(BaseModel):
     labels: list
     values: list
     chart_type: str   # "bar", "line", "pie"
     title: str = ""
+
 
 @app.post("/generate-chart")
 def generate_chart(payload: ChartRequest):
@@ -80,26 +90,42 @@ def generate_chart(payload: ChartRequest):
         "values": payload.values
     })
 
-    fig, ax = plt.subplots(figsize=(6,4))
+    fig, ax = plt.subplots(figsize=(7, 4))
 
     chart = payload.chart_type.lower()
 
-    if chart == "bar":
-        ax.bar(df["labels"], df["values"])
-    elif chart == "line":
-        ax.plot(df["labels"], df["values"])
-    elif chart == "pie":
-        ax.pie(df["values"], labels=df["labels"], autopct='%1.1f%%')
-    else:
-        return {"error": "unsupported chart type"}
+    try:
+        if chart == "bar":
+            ax.bar(df["labels"], df["values"])
+        elif chart == "line":
+            ax.plot(df["labels"], df["values"], marker="o")
+        elif chart == "pie":
+            ax.pie(df["values"], labels=df["labels"], autopct='%1.1f%%')
+        else:
+            return {"error": "unsupported chart type"}
+    except Exception as e:
+        return {"error": f"chart generation error: {e}"}
 
     ax.set_title(payload.title)
     plt.tight_layout()
 
-    # Retour en base64
-    buf = BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode()
+    # 🔥 GENERATE UNIQUE FILE NAME
+    file_id = uuid.uuid4()
+    filename = f"chart_{file_id}.png"
+    filepath = os.path.join("static", filename)
 
-    return {"image_base64": b64}
+    # 🔥 SAVE PNG FILE!
+    try:
+        fig.savefig(filepath, format="png")
+    except Exception as e:
+        return {"error": f"file saving error: {e}"}
+
+    # IMPORTANT : REMPLACE ICI PAR TON URL APP SERVICE !
+    BASE_URL = "https://appservicegentixhistogramme-btevcspbxhqard7.eastus-01.azurewebsites.net"
+
+    public_url = f"{BASE_URL}/static/{filename}"
+
+    return {
+        "image_url": public_url,
+        "message": "Image generated successfully."
+    }
