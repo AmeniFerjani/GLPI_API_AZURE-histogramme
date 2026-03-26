@@ -1,11 +1,12 @@
-# main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
+import uuid
 import mysql.connector
 import matplotlib
-matplotlib.use("Agg")   # moteur sans interface graphique (obligatoire sur serveur)
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd
@@ -13,8 +14,18 @@ import io
 import base64
 import json
 from typing import Optional
+from pathlib import Path
 
 app = FastAPI()
+
+# ──────────────────────────────────────────────
+# DOSSIER STATIQUE POUR LES IMAGES
+# ──────────────────────────────────────────────
+
+CHARTS_DIR = Path("/tmp/charts")
+CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+app.mount("/charts", StaticFiles(directory=str(CHARTS_DIR)), name="charts")
 
 # ──────────────────────────────────────────────
 # MODÈLES DE DONNÉES
@@ -25,7 +36,7 @@ class SQLQuery(BaseModel):
 
 class ChartRequest(BaseModel):
     query: str
-    chart_type: Optional[str] = "auto"   # auto | bar | line | pie | doughnut | horizontal_bar | area
+    chart_type: Optional[str] = "auto"
     title: Optional[str] = ""
     xlabel: Optional[str] = ""
     ylabel: Optional[str] = ""
@@ -56,7 +67,6 @@ def run_query(query: str):
         col_names = [desc[0] for desc in cur.description] if cur.description else []
         return rows, col_names
     except Exception as e:
-        # Retourne HTTP 200 avec erreur JSON pour que l'agent puisse l'intercepter
         return None, str(e)
     finally:
         try:
@@ -70,13 +80,8 @@ def run_query(query: str):
 # ──────────────────────────────────────────────
 
 def detect_chart_type(df: pd.DataFrame, hint: str) -> str:
-    """
-    Choisit automatiquement le meilleur type de graphique
-    selon les données et l'indice fourni par l'agent.
-    """
     hint = (hint or "").lower()
 
-    # Indice explicite de l'agent
     if "line" in hint or "courbe" in hint or "evolution" in hint or "tendance" in hint:
         return "line"
     if "pie" in hint or "camembert" in hint or "donut" in hint or "doughnut" in hint:
@@ -88,14 +93,10 @@ def detect_chart_type(df: pd.DataFrame, hint: str) -> str:
     if "bar" in hint or "histogramme" in hint or "colonne" in hint:
         return "bar"
 
-    # Détection automatique selon les données
     if df is None or df.empty:
         return "bar"
 
-    col0 = str(df.iloc[:, 0].dtype)
     n_rows = len(df)
-
-    # Si première colonne contient des mois/années → courbe
     first_vals = df.iloc[:, 0].astype(str).str.lower()
     time_keywords = ["jan", "fev", "mar", "avr", "mai", "juin", "juil",
                      "aou", "sep", "oct", "nov", "dec", "2020", "2021",
@@ -103,13 +104,11 @@ def detect_chart_type(df: pd.DataFrame, hint: str) -> str:
     if any(any(kw in v for kw in time_keywords) for v in first_vals):
         return "line"
 
-    # Peu de catégories et valeurs en % → pie
     if n_rows <= 6 and df.shape[1] == 2:
         vals = pd.to_numeric(df.iloc[:, 1], errors="coerce").dropna()
         if len(vals) > 0 and vals.max() <= 100 and vals.min() >= 0:
             return "pie"
 
-    # Beaucoup de lignes avec labels longs → horizontal_bar
     if n_rows > 8:
         return "horizontal_bar"
     if df.shape[1] >= 2:
@@ -130,7 +129,6 @@ PALETTE = [
 ]
 
 def apply_dark_style(fig, ax, title, xlabel, ylabel):
-    """Applique le style sombre cohérent avec l'interface."""
     BG      = "#0d1220"
     SURFACE = "#111825"
     TEXT    = "#e2e8f8"
@@ -166,9 +164,7 @@ def make_bar(df, title, xlabel, ylabel):
     fig, ax = plt.subplots(figsize=(10, 5))
     bars = ax.bar(labels, values,
                   color=PALETTE[:len(labels)],
-                  edgecolor="#0a0d14", linewidth=0.8,
-                  zorder=3)
-    # Valeurs au-dessus des barres
+                  edgecolor="#0a0d14", linewidth=0.8, zorder=3)
     for bar, val in zip(bars, values):
         ax.text(bar.get_x() + bar.get_width() / 2,
                 bar.get_height() + max(values) * 0.01,
@@ -183,14 +179,12 @@ def make_bar(df, title, xlabel, ylabel):
 def make_horizontal_bar(df, title, xlabel, ylabel):
     labels = df.iloc[:, 0].astype(str).tolist()
     values = pd.to_numeric(df.iloc[:, 1], errors="coerce").fillna(0).tolist()
-    # Trier par valeur décroissante
     pairs = sorted(zip(values, labels), reverse=True)
     values, labels = zip(*pairs) if pairs else ([], [])
     fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.45)))
     bars = ax.barh(labels, values,
                    color=PALETTE[:len(labels)],
-                   edgecolor="#0a0d14", linewidth=0.8,
-                   zorder=3)
+                   edgecolor="#0a0d14", linewidth=0.8, zorder=3)
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + max(values) * 0.01,
                 bar.get_y() + bar.get_height() / 2,
@@ -213,7 +207,6 @@ def make_line(df, title, xlabel, ylabel):
                 marker="o", markersize=6,
                 markerfacecolor="#00d4aa", markeredgecolor="#0a0d14",
                 markeredgewidth=1.5, zorder=3, label=col)
-        # Remplissage sous la courbe
         ax.fill_between(labels, values, alpha=0.08, color=color)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=30, ha="right")
@@ -246,12 +239,8 @@ def make_pie(df, title, xlabel, ylabel):
     values = pd.to_numeric(df.iloc[:, 1], errors="coerce").fillna(0).tolist()
     fig, ax = plt.subplots(figsize=(8, 6))
     wedges, texts, autotexts = ax.pie(
-        values,
-        labels=labels,
-        colors=PALETTE[:len(labels)],
-        autopct="%1.1f%%",
-        startangle=140,
-        pctdistance=0.75,
+        values, labels=labels, colors=PALETTE[:len(labels)],
+        autopct="%1.1f%%", startangle=140, pctdistance=0.75,
         wedgeprops={"edgecolor": "#0a0d14", "linewidth": 2}
     )
     for text in texts:
@@ -261,7 +250,6 @@ def make_pie(df, title, xlabel, ylabel):
         autotext.set_color("#e2e8f8")
         autotext.set_fontsize(9)
         autotext.set_fontweight("bold")
-    # Cercle central pour effet donut
     centre = plt.Circle((0, 0), 0.45, fc="#0d1220")
     ax.add_patch(centre)
     apply_dark_style(fig, None, title, xlabel, ylabel)
@@ -270,7 +258,6 @@ def make_pie(df, title, xlabel, ylabel):
     return fig
 
 def make_multi_bar(df, title, xlabel, ylabel):
-    """Barres groupées pour plusieurs séries."""
     import numpy as np
     labels = df.iloc[:, 0].astype(str).tolist()
     n_groups = len(labels)
@@ -293,7 +280,7 @@ def make_multi_bar(df, title, xlabel, ylabel):
     return fig
 
 # ──────────────────────────────────────────────
-# CONVERSION FIGURE → PNG BASE64
+# SAUVEGARDE FIGURE → FICHIER PNG + URL
 # ──────────────────────────────────────────────
 
 def fig_to_base64(fig) -> str:
@@ -304,15 +291,35 @@ def fig_to_base64(fig) -> str:
     buf.seek(0)
     return base64.b64encode(buf.read()).decode("utf-8")
 
+def fig_to_url(fig, request_base_url: str) -> tuple[str, str]:
+    """Sauvegarde la figure en PNG et retourne (url, base64)."""
+    filename = f"{uuid.uuid4().hex}.png"
+    filepath = CHARTS_DIR / filename
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150,
+                bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    png_bytes = buf.read()
+
+    # Sauvegarde sur disque
+    with open(filepath, "wb") as f:
+        f.write(png_bytes)
+
+    # URL publique
+    chart_url = f"{request_base_url}charts/{filename}"
+    b64 = base64.b64encode(png_bytes).decode("utf-8")
+    return chart_url, b64
+
 # ──────────────────────────────────────────────
-# ENDPOINT ORIGINAL (inchangé)
+# ENDPOINT ORIGINAL
 # ──────────────────────────────────────────────
 
 @app.post("/execute-sql")
 def execute_sql(payload: SQLQuery):
     rows, col_names = run_query(payload.query)
     if rows is None:
-        # col_names contient le message d'erreur ici
         return JSONResponse(
             status_code=200,
             content={"error": True, "message": str(col_names)}
@@ -322,17 +329,18 @@ def execute_sql(payload: SQLQuery):
     return {"result": rows}
 
 # ──────────────────────────────────────────────
-# ENDPOINT GRAPHIQUE (nouveau)
+# ENDPOINT GRAPHIQUE AMÉLIORÉ
 # ──────────────────────────────────────────────
 
 @app.post("/execute-sql-chart")
 def execute_sql_chart(payload: ChartRequest):
     """
     Exécute une requête SQL et retourne :
-    - result : les données brutes
-    - chart_base64 : l'image PNG encodée en base64
-    - chart_html : balise <img> prête à coller dans une page
-    - chart_type_used : le type de graphique effectivement généré
+    - chart_url     : URL publique de l'image PNG (PRIORITAIRE pour l'agent)
+    - chart_markdown: syntaxe Markdown ![chart](url) à insérer dans la réponse
+    - result        : données brutes
+    - chart_base64  : image PNG en base64 (fallback)
+    - chart_type_used: type de graphique généré
     """
     rows, col_names = run_query(payload.query)
 
@@ -345,20 +353,18 @@ def execute_sql_chart(payload: ChartRequest):
     if not rows:
         return JSONResponse(
             status_code=200,
-            content={"error": False, "result": [], "chart_base64": None,
-                     "message": "Aucune donnée retournée par la requête."}
+            content={"error": False, "result": [],
+                     "chart_url": None,
+                     "message": "Aucune donnee retournee par la requete."}
         )
 
-    # Construire le DataFrame
     try:
         df = pd.DataFrame(rows, columns=col_names)
     except Exception:
         df = pd.DataFrame(rows)
 
-    # Choisir le type de graphique
     chart_type = detect_chart_type(df, payload.chart_type or "auto")
 
-    # Générer le graphique
     try:
         if chart_type == "bar":
             fig = make_bar(df, payload.title, payload.xlabel, payload.ylabel)
@@ -370,31 +376,39 @@ def execute_sql_chart(payload: ChartRequest):
             fig = make_area(df, payload.title, payload.xlabel, payload.ylabel)
         elif chart_type in ("pie", "doughnut"):
             fig = make_pie(df, payload.title, payload.xlabel, payload.ylabel)
-        elif chart_type == "multi_bar" or (df.shape[1] > 2):
+        elif df.shape[1] > 2:
             fig = make_multi_bar(df, payload.title, payload.xlabel, payload.ylabel)
         else:
             fig = make_bar(df, payload.title, payload.xlabel, payload.ylabel)
 
-        img_b64 = fig_to_base64(fig)
-        img_html = (
-            f'<img src="data:image/png;base64,{img_b64}" '
-            f'style="max-width:100%;border-radius:12px;" />'
-        )
+        # Base URL détectée automatiquement
+        base_url = "https://appservicegentixhistogramme-btevcsfpbxhqard7.eastus-01.azurewebsites.net/"
+        chart_url, img_b64 = fig_to_url(fig, base_url)
+
+        title_display = payload.title or "Graphique"
+
+        return {
+            "error": False,
+            "result": [list(row) for row in rows],
+            "columns": col_names,
+            # ← L'agent DOIT utiliser chart_url et chart_markdown
+            "chart_url": chart_url,
+            "chart_markdown": f"![{title_display}]({chart_url})",
+            "display_instruction": (
+                f"AFFICHE cette image dans ta reponse en utilisant exactement ce Markdown : "
+                f"![{title_display}]({chart_url})"
+            ),
+            # Fallback base64 (non affiché dans le chat)
+            "chart_base64": img_b64,
+            "chart_type_used": chart_type,
+            "rows_count": len(rows)
+        }
+
     except Exception as e:
         return JSONResponse(
             status_code=200,
-            content={"error": True, "message": f"Erreur génération graphique : {str(e)}"}
+            content={"error": True, "message": f"Erreur generation graphique : {str(e)}"}
         )
-
-    return {
-        "error": False,
-        "result": [list(row) for row in rows],
-        "columns": col_names,
-        "chart_base64": img_b64,
-        "chart_html": img_html,
-        "chart_type_used": chart_type,
-        "rows_count": len(rows)
-    }
 
 # ──────────────────────────────────────────────
 # ENDPOINT SANTÉ
