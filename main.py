@@ -4,22 +4,22 @@ from pydantic import BaseModel
 import os
 import mysql.connector
 
-# --- Génération graphiques PNG ---
+# Matplotlib (PNG)
 import matplotlib.pyplot as plt
 import pandas as pd
-import uuid
 
-# --- Graphe interactif Plotly ---
+# Plotly (Interactif HTML)
 import plotly.graph_objects as go
 
-# Fichiers statiques
+# UUID + Fichiers statiques
+import uuid
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
 
 # ---------------------------------------------------------
-#  PARTIE 1 — API SQL (inchangée)
+# 1️⃣ PARTIE SQL (inchangée, testée et stable)
 # ---------------------------------------------------------
 
 class SQLQuery(BaseModel):
@@ -45,8 +45,7 @@ def run_query(query: str):
     try:
         cur = cnx.cursor()
         cur.execute(query)
-        rows = cur.fetchall()
-        return rows
+        return cur.fetchall()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"SQL error: {e}")
     finally:
@@ -60,7 +59,7 @@ def run_query(query: str):
 @app.post("/execute-sql")
 def execute_sql(payload: SQLQuery):
     rows = run_query(payload.query)
-    if rows and len(rows) == 1 and isinstance(rows[0], (list, tuple)) and len(rows[0]) == 1:
+    if rows and len(rows) == 1 and len(rows[0]) == 1:
         return {"value": rows[0][0]}
     return {"result": rows}
 
@@ -71,132 +70,123 @@ def healthz():
 
 
 # ---------------------------------------------------------
-#  PARTIE 2 — FICHIERS STATIQUES POUR IMAGES & HTML
+# 2️⃣ PARTIE STATIQUE (images + html)
 # ---------------------------------------------------------
 
-# Créer dossier "static" si inexistant
 if not os.path.exists("static"):
     os.makedirs("static")
 
-# Monter /static accessible publiquement
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# ⚠️ CHANGE ICI AVEC TON URL APP SERVICE
+BASE_URL = "https://histogramme-afd9fua3g2e9dqe0.eastus-01.azurewebsites.net"
+
 
 # ---------------------------------------------------------
-#  PARTIE 3 — FORMAT JSON pour graphiques
+# 3️⃣ FORMAT D’ENTRÉE POUR LES GRAPHIQUES (nouvelle version)
 # ---------------------------------------------------------
 
-class ChartRequest(BaseModel):
-    labels: list
-    values: list
-    chart_type: str   # "bar", "line", "pie"
+class ChartData(BaseModel):
+    data: list        # ex: [ ["2023-01-01", 12], ["2023-01-02", 18] ]
+    chart_type: str   # "line", "bar", "pie"
     title: str = ""
 
 
 # ---------------------------------------------------------
-#  PARTIE 4 — GRAPHIQUE PNG (Matplotlib)
+# 4️⃣ GRAPHIQUE PNG (statique)
 # ---------------------------------------------------------
 
 @app.post("/generate-chart")
-def generate_chart(payload: ChartRequest):
+def generate_chart(payload: ChartData):
 
-    df = pd.DataFrame({
-        "labels": payload.labels,
-        "values": payload.values
-    })
+    # Extraction labels & valeurs
+    try:
+        labels = [str(row[0]) for row in payload.data]
+        values = [float(row[1]) for row in payload.data]
+    except:
+        return {"error": "Invalid data format"}
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(8, 4))
 
     chart = payload.chart_type.lower()
 
     try:
-        if chart == "bar":
-            ax.bar(df["labels"], df["values"])
-        elif chart == "line":
-            ax.plot(df["labels"], df["values"], marker="o")
+        if chart == "line":
+            ax.plot(labels, values, marker="o")
+        elif chart == "bar":
+            ax.bar(labels, values)
         elif chart == "pie":
-            ax.pie(df["values"], labels=df["labels"], autopct='%1.1f%%')
+            ax.pie(values, labels=labels, autopct='%1.1f%%')
         else:
-            return {"error": "unsupported chart type"}
-    except Exception as e:
-        return {"error": f"chart generation error: {e}"}
+            return {"error": "Unsupported chart type"}
+    except:
+        return {"error": "Chart generation error"}
 
     ax.set_title(payload.title)
+    plt.xticks(rotation=45)
     plt.tight_layout()
 
-    # Nom unique
-    file_id = uuid.uuid4()
-    filename = f"chart_{file_id}.png"
+    filename = f"chart_{uuid.uuid4()}.png"
     filepath = os.path.join("static", filename)
+    fig.savefig(filepath)
 
-    try:
-        fig.savefig(filepath, format="png")
-    except Exception as e:
-        return {"error": f"file saving error: {e}"}
+    image_url = f"{BASE_URL}/static/{filename}"
 
-    # ⚠️ IMPORTANT : Mets ici l’URL réelle de ton App Service
-    BASE_URL = "https://histogramme-afd9fua3g2e9dqe0.eastus-01.azurewebsites.net"
-
-    public_url = f"{BASE_URL}/static/{filename}"
-
-    return {
-        "image_url": public_url,
-        "message": "Image generated successfully."
-    }
+    return {"image_url": image_url}
 
 
 # ---------------------------------------------------------
-#  PARTIE 5 — GRAPHIQUE INTERACTIF (Plotly HTML)
+# 5️⃣ GRAPHIQUE INTERACTIF (Plotly HTML)
 # ---------------------------------------------------------
 
 @app.post("/generate-chart-interactive")
-def generate_chart_interactive(payload: ChartRequest):
+def generate_chart_interactive(payload: ChartData):
+
+    try:
+        labels = [str(row[0]) for row in payload.data]
+        values = [float(row[1]) for row in payload.data]
+    except:
+        return {"error": "Invalid data format"}
 
     fig = go.Figure()
 
-    if payload.chart_type == "line":
+    chart = payload.chart_type.lower()
+
+    if chart == "line":
         fig.add_trace(go.Scatter(
-            x=payload.labels,
-            y=payload.values,
-            mode='lines+markers',
+            x=labels,
+            y=values,
+            mode="lines+markers",
             hovertemplate="Date: %{x}<br>Valeur: %{y}<extra></extra>"
         ))
 
-    elif payload.chart_type == "bar":
+    elif chart == "bar":
         fig.add_trace(go.Bar(
-            x=payload.labels,
-            y=payload.values,
+            x=labels,
+            y=values,
             hovertemplate="Catégorie: %{x}<br>Valeur: %{y}<extra></extra>"
         ))
 
-    elif payload.chart_type == "pie":
+    elif chart == "pie":
         fig.add_trace(go.Pie(
-            labels=payload.labels,
-            values=payload.values,
+            labels=labels,
+            values=values,
             hovertemplate="%{label}: %{value}<extra></extra>"
         ))
 
+    else:
+        return {"error": "Unsupported chart type"}
+
     fig.update_layout(title=payload.title)
 
-    # HTML
-    html = fig.to_html(include_plotlyjs='cdn')
+    html_code = fig.to_html(include_plotlyjs="cdn")
 
-    file_id = uuid.uuid4()
-    filename = f"graph_{file_id}.html"
+    filename = f"graph_{uuid.uuid4()}.html"
     filepath = os.path.join("static", filename)
 
-    try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(html)
-    except Exception as e:
-        return {"error": f"html saving error: {e}"}
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html_code)
 
-    # ⚠️ Replace URL !
-    BASE_URL = "https://histogramme-afd9fua3g2e9dqe0.eastus-01.azurewebsites.net"
+    interactive_url = f"{BASE_URL}/static/{filename}"
 
-    public_url = f"{BASE_URL}/static/{filename}"
-
-    return {
-        "interactive_url": public_url,
-        "message": "Interactive graph generated successfully."
-    }
+    return {"interactive_url": interactive_url}
