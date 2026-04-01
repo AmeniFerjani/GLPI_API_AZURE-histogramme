@@ -1,24 +1,31 @@
 # main.py — GLPI Agent API compatible Azure AI Foundry
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
 from pydantic import BaseModel
 from typing import Optional, List, Any
-import os, uuid, io, base64, tempfile
+
+import os
+import uuid
 import mysql.connector
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
+
+import plotly.express as px
 from datetime import datetime
+
 
 # --------------------------------------------------------------------
 # FASTAPI INIT
 # --------------------------------------------------------------------
-app = FastAPI(title="GLPI Agent API", version="3.0")
+app = FastAPI(title="GLPI Agent API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +33,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --------------------------------------------------------------------
+# CREATE PUBLIC STATIC DIRECTORY
+# --------------------------------------------------------------------
+PUBLIC_DIR = "/home/site/wwwroot/files"
+os.makedirs(PUBLIC_DIR, exist_ok=True)
+
+# Public URL exposure
+app.mount("/files", StaticFiles(directory=PUBLIC_DIR), name="files")
+
 
 # --------------------------------------------------------------------
 # MODELS
@@ -44,6 +61,7 @@ class ChartRequest(BaseModel):
     title: Optional[str] = "Graphique GLPI"
     x_label: Optional[str] = ""
     y_label: Optional[str] = ""
+
 
 # --------------------------------------------------------------------
 # DATABASE
@@ -73,12 +91,12 @@ def run_query(sql: str):
         cur.close()
         db.close()
 
+
 # --------------------------------------------------------------------
-# SQL EXECUTOR — COMPATIBLE FOUNDRY
+# SQL EXECUTOR — for Foundry
 # --------------------------------------------------------------------
 @app.post("/execute-sql")
 def execute_sql(payload: SQLQuery):
-
     try:
         cols, rows = run_query(payload.query)
     except:
@@ -87,17 +105,15 @@ def execute_sql(payload: SQLQuery):
     if rows and len(rows) == 1 and len(rows[0]) == 1:
         return {"value": rows[0][0]}
 
-    # safe serialization
     def safe(v):
-        if isinstance(v, datetime):
-            return v.isoformat()
-        return v
+        return v.isoformat() if isinstance(v, datetime) else v
 
     rows = [[safe(x) for x in r] for r in rows]
     return {"columns": cols, "rows": rows}
 
+
 # --------------------------------------------------------------------
-# EXCEL EXPORT — COMPATIBLE FOUNDRY (file_url)
+# EXCEL EXPORT — PUBLIC FILE (Foundry download button)
 # --------------------------------------------------------------------
 @app.post("/generate-excel")
 def generate_excel(payload: ExcelRequest):
@@ -108,20 +124,17 @@ def generate_excel(payload: ExcelRequest):
     ws = wb.active
     ws.title = payload.sheet_name[:31]
 
-    # Title
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cols))
     c = ws.cell(row=1, column=1, value=payload.title)
     c.font = Font(bold=True, size=14, color="FFFFFF")
     c.fill = PatternFill("solid", fgColor="1F4E79")
     c.alignment = Alignment(horizontal="center")
 
-    # Date
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(cols))
     d = ws.cell(row=2, column=1, value=f"Généré le {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     d.font = Font(italic=True, size=10)
     d.alignment = Alignment(horizontal="right")
 
-    # Header
     header_fill = PatternFill("solid", fgColor="2E75B6")
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -133,27 +146,26 @@ def generate_excel(payload: ExcelRequest):
         cell.alignment = Alignment(horizontal="center")
         cell.border = border
 
-    # Rows
     for r_index, r in enumerate(rows, start=4):
         for c_index, v in enumerate(r, start=1):
             cell = ws.cell(row=r_index, column=c_index, value=str(v))
             cell.border = border
 
-    ws.auto_filter.ref = ws.dimensions
-    ws.freeze_panes = "A4"
+    filename = f"excel_{uuid.uuid4()}.xlsx"
+    filepath = os.path.join(PUBLIC_DIR, filename)
+    wb.save(filepath)
 
-    # Temp file
-    tmp_path = f"/tmp/{uuid.uuid4()}.xlsx"
-    wb.save(tmp_path)
+    public_url = f"https://{os.getenv('WEBSITE_HOSTNAME')}/files/{filename}"
 
     return {
-        "file_url": tmp_path,
-        "file_name": "rapport_glpi.xlsx",
+        "file_url": public_url,
+        "file_name": filename,
         "message": "Excel généré avec succès."
     }
 
+
 # --------------------------------------------------------------------
-# CHART GENERATOR — COMPATIBLE FOUNDRY (image_url)
+# CHART GENERATOR — INTERACTIVE HTML (Foundry-compatible)
 # --------------------------------------------------------------------
 @app.post("/generate-chart")
 def generate_chart(payload: ChartRequest):
@@ -164,34 +176,35 @@ def generate_chart(payload: ChartRequest):
     labels = [str(x[0]) for x in payload.data]
     values = [float(x[1]) if x[1] else 0 for x in payload.data]
 
-    fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-
+    # Interactive Plotly Chart
     if payload.chart_type == "pie":
-        ax.pie(values, labels=labels, autopct="%1.1f%%")
+        fig = px.pie(names=labels, values=values, title=payload.title)
     elif payload.chart_type == "line":
-        ax.plot(labels, values)
+        fig = px.line(x=labels, y=values, title=payload.title)
     else:
-        ax.bar(labels, values)
+        fig = px.bar(x=labels, y=values, title=payload.title)
 
-    ax.set_title(payload.title)
+    filename = f"chart_{uuid.uuid4()}.html"
+    filepath = os.path.join(PUBLIC_DIR, filename)
 
-    tmp_path = f"/tmp/{uuid.uuid4()}.png"
-    plt.savefig(tmp_path, bbox_inches="tight")
-    plt.close()
+    fig.write_html(filepath)
+
+    public_url = f"https://{os.getenv('WEBSITE_HOSTNAME')}/files/{filename}"
 
     return {
-        "image_url": tmp_path,
+        "image_url": public_url,
         "chart_type": payload.chart_type,
         "message": "Graphique généré."
     }
 
+
 # --------------------------------------------------------------------
-# HEALTHZ
+# HEALTH CHECK
 # --------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
     return {
         "status": "ok",
-        "version": "3.0",
+        "version": "4.0",
         "timestamp": datetime.now().isoformat()
     }
