@@ -3,7 +3,7 @@
 # Azure App Service · Python 3.11 · FastAPI
 #
 # Endpoints :
-#   POST /execute-sql                  → SQL query (toujours HTTP 200)
+#   POST /sql-executor                  → SQL query (toujours HTTP 200)
 #   POST /generate-chart               → PNG statique  (image_url)
 #   POST /generate-chart-interactive   → HTML Plotly   (interactive_url)
 #   POST /generate-excel               → fichier .xlsx en téléchargement
@@ -155,10 +155,10 @@ def _style_ax(ax, x_label, y_label):
 
 
 # =============================================================
-# POST /execute-sql
+# POST /sql-executor
 # =============================================================
 
-@app.post("/execute-sql")
+@app.post("/sql-executor")
 def execute_sql(payload: SQLQuery):
     """
     Exécute une requête SQL — retourne TOUJOURS HTTP 200.
